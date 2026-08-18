@@ -10,6 +10,15 @@ from google.api_core.exceptions import ResourceExhausted
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 genai.configure(api_key=GOOGLE_API_KEY)
 
+st.set_page_config(
+    page_title="김휘준 선생님 AI", # 웹 브라우저 탭 이름도 예쁘게 바꿀 수 있습니다.
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': None
+    }
+)
+
 # ==========================================
 # 🌟 고도화된 전처리 함수 (사진 압축 + CLAHE + 캐싱)
 # ==========================================
