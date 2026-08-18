@@ -3,11 +3,15 @@ import google.generativeai as genai
 from PIL import Image, ImageEnhance, ImageOps
 import cv2
 import numpy as np
+from google.api_core.exceptions import ResourceExhausted # 🌟 토큰 에러 처리를 위한 모듈 추가
 
 # 1. API 키 설정 
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 genai.configure(api_key=GOOGLE_API_KEY)
 
+# ==========================================
+# 🌟 고도화된 전처리 함수 (CLAHE 적용)
+# ==========================================
 def preprocess_image(img):
     # 1. PIL 이미지를 OpenCV(numpy 배열) 포맷으로 변환
     img_array = np.array(img)
@@ -15,28 +19,24 @@ def preprocess_image(img):
     # 2. 흑백(Grayscale) 변환
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
-    # 3. 핵심: 적응형 이진화 (Adaptive Thresholding)
-    # 주변 21x21 픽셀 구역의 평균 밝기를 계산해 그림자 속에서도 글씨만 추출 (상수 15로 노이즈 조절)
-    processed = cv2.adaptiveThreshold(
-        gray, 255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 
-        21, 15
-    )
+    # 3. 실무 OCR 표준: CLAHE 적용 (강제 흑백 이진화의 부작용 방지)
+    # 흐린 글씨는 보존하면서 그림자만 자연스럽게 제거해 줍니다.
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    processed = clahe.apply(gray)
     
     # 4. 다시 Streamlit에 띄우기 위해 PIL 이미지로 복구
     final_img = Image.fromarray(processed)
     return final_img
 
 # ==========================================
-# 🌟 핵심: 세션 상태 초기화 (대화 기억하기)
+# 🌟 세션 상태 초기화 (대화 기억하기)
 # ==========================================
 if "chat_session" not in st.session_state:
     st.session_state.chat_session = None # AI와의 채팅 세션(맥락) 유지
 if "messages" not in st.session_state:
     st.session_state.messages = []       # 화면에 띄울 대화 기록 유지
 
-st.title("김휘준 대체 AI Bot ")
+st.title("👨‍🏫 김휘준 대체 AI Bot")
 st.write("수학 문제 사진을 올리면, 수준에 맞춰 풀이를 제공합니다.")
 
 # 2. 이미지 업로드 UI
@@ -51,7 +51,7 @@ if uploaded_file is not None:
         with col1:
             st.image(raw_img, caption="원본", use_container_width=True)
         with col2:
-            st.image(processed_img, caption="AI 분석용", use_container_width=True)
+            st.image(processed_img, caption="AI 분석용 (CLAHE 보정)", use_container_width=True)
 
     choice = st.radio(
         "현재 나의 상태를 선택해 주세요.",
@@ -89,12 +89,18 @@ if uploaded_file is not None:
             chat = model.start_chat(history=[])
             st.session_state.chat_session = chat
             
-            # 첫 번째 메시지 (전처리된 이미지 + 초기 질문) 전송
-            response = chat.send_message([processed_img, "이 문제를 조건에 맞춰 풀어줘."])
+            try:
+                # 첫 번째 메시지 (전처리된 이미지 + 초기 질문) 전송
+                response = chat.send_message([processed_img, "이 문제를 조건에 맞춰 풀어줘."])
+                
+                # 첫 번째 답변 기록 저장
+                st.session_state.messages.append({"role": "user", "content": "(사진과 함께 질문을 보냈습니다.)"})
+                st.session_state.messages.append({"role": "ai", "content": response.text})
             
-            # 첫 번째 답변 기록 저장
-            st.session_state.messages.append({"role": "user", "content": "(사진과 함께 질문을 보냈습니다.)"})
-            st.session_state.messages.append({"role": "ai", "content": response.text})
+            except ResourceExhausted:
+                st.error("앗! 선생님이 한 번에 너무 많은 질문을 처리하느라 지쳤어요. (API 할당량 초과) 딱 1분만 기다렸다가 다시 질문해 주세요!")
+            except Exception as e:
+                st.error(f"알 수 없는 오류가 발생했습니다: {e}")
 
 # ==========================================
 # 4. 💬 채팅 UI (대화 내역 출력 및 꼬리 질문 입력)
@@ -128,6 +134,22 @@ if prompt := st.chat_input("추가로 궁금한 점을 물어보세요."):
         # AI에게 꼬리 질문 전송 및 답변 받기 (이전 맥락을 기억함)
         with st.chat_message("ai"):
             with st.spinner("생각 중입니다."):
-                response = st.session_state.chat_session.send_message(prompt)
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "ai", "content": response.text})
+                try:
+                    # 🌟 [핵심 수술] 토큰 폭발을 막기 위한 '메모리 다이어트' (Sliding Window)
+                    current_history = st.session_state.chat_session.history
+                    
+                    # 대화 턴이 3번(질문-답변 세트가 3개 = history 길이 6)을 넘어가면
+                    if len(current_history) > 6:
+                        # 최초의 이미지와 풀이(인덱스 0, 1) + 가장 최근의 꼬리 질문과 풀이(마지막 4개)만 남기고 재조립
+                        diet_history = current_history[:2] + current_history[-4:]
+                        st.session_state.chat_session.history = diet_history
+                    
+                    # 다이어트된 상태로 새로운 꼬리 질문 전송
+                    response = st.session_state.chat_session.send_message(prompt)
+                    st.markdown(response.text)
+                    st.session_state.messages.append({"role": "ai", "content": response.text})
+                    
+                except ResourceExhausted:
+                    st.error("앗! 선생님이 한 번에 너무 많은 질문을 처리하느라 지쳤어요. (API 할당량 초과) 딱 1분만 기다렸다가 다시 질문해 주세요!")
+                except Exception as e:
+                    st.error(f"알 수 없는 오류가 발생했습니다: {e}")
